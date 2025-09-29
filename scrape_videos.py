@@ -3,13 +3,21 @@ from bs4 import BeautifulSoup
 import threading
 import queue
 import time
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urljoin
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 import pandas as pd
 import os
 import json
 import re
+
+# Headers
+headers = {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+    'Accept-Language': 'en-US,en;q=0.9',
+    'Referer': 'https://www.google.com/'
+}
 
 # Locks
 sheets_lock = threading.Lock()
@@ -127,16 +135,6 @@ def scrape_page(page_num, config, update_global=True):
     print(f"Đang truy cập URL: {url}")
     write_debug_log(f"Đang truy cập URL: {url}")
     
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-        'Accept-Language': 'en-US,en;q=0.9',
-        'Referer': 'https://www.google.com/',
-        'Connection': 'keep-alive',
-        'Accept-Encoding': 'gzip, deflate, br',
-        'Upgrade-Insecure-Requests': '1'
-    }
-    
     response, soup = get_page_with_redirects(url, headers)
     if not response:
         return []
@@ -184,48 +182,33 @@ def scrape_page(page_num, config, update_global=True):
         # Get video ID from id="post-XXXXX"
         video_id = str(item.get('id', '').replace('post-', '')) if item.get('id') else 'N/A'
         if video_id == 'N/A':
+            print(f"Skipping item with no ID on page {page_num}")
+            write_debug_log(f"Skipping item with no ID on page {page_num}")
             continue
         # Get title and link
         a_tag = item.find('a', class_='thumbnail-link')
         title = a_tag.get('title', 'N/A') if a_tag else 'N/A'
+        code = title.split(' ')[0] if title != 'N/A' else 'N/A'
         link = urljoin(config['DOMAIN'], a_tag.get('href', 'N/A')) if a_tag else 'N/A'
-        
-        # Get thumbnail
-        img_tag = item.find('img')
-        source_tag = item.find('source', type='image/webp')
-        thumbnail = source_tag.get('srcset', img_tag.get('src', 'N/A')) if source_tag or img_tag else 'N/A'
-        thumbnail = urljoin(config['DOMAIN'], thumbnail.split(' ')[0]) if thumbnail != 'N/A' and not thumbnail.startswith('http') else thumbnail.split(' ')[0]
         
         # Get ribbons
         ribboni = item.find('p', class_='ribboni')
         ribboni = ribboni.text.strip() if ribboni else 'N/A'
         ribbons = item.find('p', class_='ribbons')
         ribbons = ribbons.text.strip() if ribbons else 'N/A'
-        ribbont = item.find('span', class_='ribbont')
-        duration = ribbont.text.strip() if ribbont else 'N/A'
         
-        # Get categories and tags from class
+        # Get categories from class
         classes = item.get('class', [])
         categories = [cls.replace('category-', '') for cls in classes if cls.startswith('category-')]
-        tags = [cls.replace('tag-', '') for cls in classes if cls.startswith('tag-')]
-        
-        # Get date and views (not available in provided HTML)
-        date = 'N/A'
-        views = 0
         
         data = {
             'page': page_num,
             'id': video_id,
-            'title': title,
+            'code': code,
             'link': link,
-            'thumbnail': thumbnail,
-            'ribboni': ribboni,
             'ribbons': ribbons,
-            'duration': duration,
-            'date': date,
-            'categories': categories if categories else ['N/A'],
-            'tags': tags if tags else ['N/A'],
-            'views_pagination': views
+            'ribboni': ribboni,
+            'categories': categories if categories else ['N/A']
         }
         print(f"Scraped video from page {page_num}: {data}")
         write_debug_log(f"Scraped video from page {page_num}: {json.dumps(data, ensure_ascii=False)}")
@@ -265,18 +248,6 @@ def worker(config):
         page_queue.task_done()
         time.sleep(0.5)
 
-# Convert views to number
-def convert_views(views_str):
-    try:
-        views_str = views_str.lower().replace(',', '')
-        if 'k' in views_str:
-            return int(float(views_str.replace('k', '')) * 1000)
-        elif 'm' in views_str:
-            return int(float(views_str.replace('m', '')) * 1000000)
-        return int(views_str)
-    except (ValueError, AttributeError):
-        return 0
-
 # Convert likes/dislikes to number
 def convert_likes_dislikes(value):
     try:
@@ -284,25 +255,8 @@ def convert_likes_dislikes(value):
     except (ValueError, AttributeError):
         return 0
 
-# Convert rating to number
-def convert_rating(rating_str):
-    try:
-        return int(rating_str.replace('%', ''))
-    except (ValueError, AttributeError):
-        return 0
-
 # Scrape detail page
 def scrape_detail(detail_link):
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-        'Accept-Language': 'en-US,en;q=0.9',
-        'Referer': 'https://www.google.com/',
-        'Connection': 'keep-alive',
-        'Accept-Encoding': 'gzip, deflate, br',
-        'Upgrade-Insecure-Requests': '1'
-    }
-    
     response, soup = get_page_with_redirects(detail_link, headers)
     if not response:
         return None
@@ -318,50 +272,11 @@ def scrape_detail(detail_link):
         write_debug_log(f"Không tìm thấy data-id trong div#video cho {detail_link}")
         return None
     
-    stats_div = soup.find('div', class_='video-stats')
-    if stats_div:
-        detail_data['likes'] = convert_likes_dislikes(stats_div.find('span', class_='likes').text.strip() if stats_div.find('span', class_='likes') else '0')
-        detail_data['dislikes'] = convert_likes_dislikes(stats_div.find('span', class_='dislikes').text.strip() if stats_div.find('span', class_='dislikes') else '0')
-        detail_data['rating'] = convert_rating(stats_div.find('span', class_='rating').text.strip() if stats_div.find('span', class_='rating') else '0')
-        detail_data['views'] = convert_views(stats_div.find('span', class_='views').text.strip() if stats_div.find('span', class_='views') else '0')
-    
-    info_div = soup.find('div', class_='video-info')
-    if info_div:
-        detail_data['video_code'] = info_div.find('span', class_='video-code').text.strip() if info_div.find('span', class_='video-code') else 'N/A'
-        detail_data['video_link'] = info_div.find('span', class_='video-link').text.strip() if info_div.find('span', class_='video-link') else 'N/A'
-    
-    desc_div = soup.find('div', class_='video-description')
-    detail_data['description'] = desc_div.text.strip()[:1000] + '...' if desc_div and len(desc_div.text.strip()) > 1000 else (desc_div.text.strip() if desc_div else 'N/A')
-    
-    actress_div = soup.find('div', class_='actress-tag')
-    detail_data['actress'] = actress_div.find('a').get('title', 'N/A') if actress_div and actress_div.find('a') else 'N/A'
-    
-    # Tags
-    tags_div = soup.find('div', class_='tags')
-    if tags_div:
-        tags = [tag.text.strip() for tag in tags_div.find_all(['a', 'span'])]
-        detail_data['tags'] = tags if tags else ['N/A']
-    else:
-        detail_data['tags'] = ['N/A']
-    
-    # Additional info from detail page
-    duration = soup.find('span', class_='duration')
-    detail_data['duration'] = duration.text.strip() if duration else 'N/A'
-    release_date = soup.find('span', class_='release-date')
-    detail_data['release_date'] = release_date.text.strip() if release_date else 'N/A'
-    category = soup.find('span', class_='category')
-    detail_data['category'] = category.text.strip() if category else 'N/A'
-    quality = soup.find('span', class_='quality')
-    detail_data['quality'] = quality.text.strip() if quality else 'N/A'
-    language = soup.find('span', class_='language')
-    detail_data['language'] = language.text.strip() if language else 'N/A'
     comment_count = soup.find('span', class_='comment-count')
     detail_data['comment_count'] = convert_likes_dislikes(comment_count.text.strip()) if comment_count else 0
     
-    # Meta tags in <head>
     meta_tags = soup.find_all('meta')
     detail_data['meta_description'] = next((meta.get('content', 'N/A') for meta in meta_tags if meta.get('name') == 'description'), 'N/A')
-    detail_data['meta_keywords'] = next((meta.get('content', 'N/A') for meta in meta_tags if meta.get('name') == 'keywords'), 'N/A')
     
     return detail_data
 
@@ -398,6 +313,9 @@ def save_data_txt(config):
         df['id'] = pd.to_numeric(df['id'], errors='coerce')
         df = df.drop_duplicates(subset=['id', 'link'], keep='last')
         df = df.sort_values(by=['page', 'id'], ascending=[True, False])
+        # Ensure only specified columns are saved
+        columns = ['page', 'id', 'code', 'link', 'ribbons', 'ribboni', 'categories', 'comment_count', 'meta_description']
+        df = df[[col for col in columns if col in df.columns]]
         sorted_data = df.to_dict('records')
         with open(config.get('DATA_TXT', 'data.txt'), 'w', encoding='utf-8') as f:
             json.dump(sorted_data, f, ensure_ascii=False, indent=2)
@@ -420,8 +338,11 @@ def update_google_sheets(config):
             df['id'] = pd.to_numeric(df['id'], errors='coerce')
             df = df.drop_duplicates(subset=['id', 'link'], keep='last')
             df = df.sort_values(by=['page', 'id'], ascending=[True, False])
+            # Ensure only specified columns are saved
+            columns = ['page', 'id', 'code', 'link', 'ribbons', 'ribboni', 'categories', 'comment_count', 'meta_description']
+            df = df[[col for col in columns if col in df.columns]]
             # Convert list columns to strings for Sheets
-            for col in ['categories', 'tags']:
+            for col in ['categories']:
                 if col in df.columns:
                     df[col] = df[col].apply(lambda x: ', '.join(x) if isinstance(x, list) else x)
             values = [df.columns.values.tolist()] + df.values.tolist()
@@ -509,7 +430,7 @@ def main():
     # Summary
     total_pages = len(set(video['page'] for video in all_video_data if video['page'] != 'N/A'))
     total_videos = len(all_video_data)
-    total_detailed = len([video for video in all_video_data if 'views' in video])
+    total_detailed = len([video for video in all_video_data if 'comment_count' in video])
     elapsed_total = time.time() - start_total
     print("Tổng quát các bước thực hiện:")
     for step in steps:
