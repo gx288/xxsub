@@ -45,3 +45,6 @@ jobs:
       with:
         name: temp-videos
         path: temp_videos.csv
+      with:
+        name: debug-files
+        path: debug_page_1.html
