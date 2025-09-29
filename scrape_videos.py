@@ -10,7 +10,6 @@ import pandas as pd
 import os
 import json
 import re
-import random
 
 # Locks
 sheets_lock = threading.Lock()
@@ -24,14 +23,6 @@ all_video_data = []
 
 # Debug log file
 DEBUG_LOG = "debug_log.txt"
-
-# List of User-Agents for rotation
-USER_AGENTS = [
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36',
-    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36',
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:130.0) Gecko/20100101 Firefox/130.0',
-    'Mozilla/5.0 (Macintosh; Intel Mac OS X 14_6_1) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Safari/605.1.15',
-]
 
 # Write to debug log
 def write_debug_log(message):
@@ -60,6 +51,7 @@ def load_existing_data(config):
                     write_debug_log("data.txt rỗng, khởi tạo mảng rỗng.")
                     return []
                 existing_data = json.loads(content)
+                # Ensure IDs are strings
                 for v in existing_data:
                     if 'id' in v:
                         v['id'] = str(v['id'])
@@ -77,49 +69,41 @@ def load_existing_data(config):
             json.dump([], f, ensure_ascii=False)
         return []
 
-# Follow redirects (HTTP and meta refresh)
-def follow_redirects(url, max_redirects=5, headers=None):
-    session = requests.Session()
-    session.max_redirects = max_redirects
-    redirects_followed = 0
+# Function to handle requests with redirect following (HTTP and meta refresh)
+def get_page_with_redirects(url, headers, max_redirects=10):
+    redirect_count = 0
     current_url = url
-    while redirects_followed < max_redirects:
+    while redirect_count < max_redirects:
         try:
-            headers = headers or {
-                'User-Agent': random.choice(USER_AGENTS),
-                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
-                'Accept-Language': 'en-US,en;q=0.9,vi;q=0.8',
-                'Connection': 'keep-alive',
-                'Accept-Encoding': 'gzip, deflate, br',
-                'Upgrade-Insecure-Requests': '1'
-            }
-            response = session.get(current_url, headers=headers, timeout=10, allow_redirects=False)
-            write_debug_log(f"Request to {current_url}, Status: {response.status_code}")
-            if 300 <= response.status_code < 400:
-                current_url = response.headers.get('Location')
-                if not current_url:
-                    write_debug_log(f"No Location header in redirect for {current_url}")
-                    return None, None
-                current_url = urljoin(current_url, current_url)
-                redirects_followed += 1
-                write_debug_log(f"HTTP Redirect to {current_url}")
-                continue
+            response = requests.get(current_url, headers=headers, timeout=10, allow_redirects=True)
             response.raise_for_status()
+            print(f"Status code for {current_url}: {response.status_code}")
+            write_debug_log(f"Status code for {current_url}: {response.status_code}")
+            
+            # Parse the content to check for meta refresh
             soup = BeautifulSoup(response.text, 'html.parser')
             meta_refresh = soup.find('meta', attrs={'http-equiv': re.compile(r'refresh', re.I)})
-            if meta_refresh and 'content' in meta_refresh.attrs:
-                content = meta_refresh['content']
-                match = re.search(r'url=(.+)', content, re.I)
+            if meta_refresh:
+                content = meta_refresh.get('content', '')
+                match = re.search(r'url=(.*)', content, re.I)
                 if match:
-                    current_url = urljoin(current_url, match.group(1).strip())
-                    redirects_followed += 1
-                    write_debug_log(f"Meta Refresh Redirect to {current_url}")
+                    redirect_url = match.group(1).strip().strip("'").strip('"')
+                    redirect_url = urljoin(current_url, redirect_url)
+                    print(f"Detected meta refresh redirect to: {redirect_url}")
+                    write_debug_log(f"Detected meta refresh redirect to: {redirect_url}")
+                    current_url = redirect_url
+                    redirect_count += 1
                     continue
-            return response, current_url
+                else:
+                    print(f"Meta refresh found but no URL in: {content}")
+                    write_debug_log(f"Meta refresh found but no URL in: {content}")
+            return response, soup
         except requests.exceptions.RequestException as e:
-            write_debug_log(f"Error following redirect for {current_url}: {e}")
+            print(f"Lỗi khi truy cập {current_url}: {e}")
+            write_debug_log(f"Lỗi khi truy cập {current_url}: {e}")
             return None, None
-    write_debug_log(f"Max redirects ({max_redirects}) reached for {url}")
+    print(f"Exceeded max redirects ({max_redirects}) for {url}")
+    write_debug_log(f"Exceeded max redirects ({max_redirects}) for {url}")
     return None, None
 
 # Scrape pagination page
@@ -130,82 +114,93 @@ def scrape_page(page_num, config, update_global=True):
     url = f"{config['DOMAIN']}/" if page_num == 1 else f"{config['DOMAIN']}/new/{page_num}/"
     print(f"Đang truy cập URL: {url}")
     write_debug_log(f"Đang truy cập URL: {url}")
-    try:
-        headers = {
-            'User-Agent': random.choice(USER_AGENTS),
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
-            'Accept-Language': 'en-US,en;q=0.9,vi;q=0.8',
-            'Referer': config['DOMAIN'],
-            'Connection': 'keep-alive',
-            'Accept-Encoding': 'gzip, deflate, br',
-            'Upgrade-Insecure-Requests': '1'
-        }
-        response, final_url = follow_redirects(url, headers=headers)
-        if not response:
-            print(f"Lỗi khi truy cập trang {page_num}: Không thể theo dõi redirect")
-            write_debug_log(f"Lỗi khi truy cập trang {page_num}: Không thể theo dõi redirect")
-            return []
-        print(f"Status code: {response.status_code}, Final URL: {final_url}")
-        write_debug_log(f"Status code: {response.status_code}, Final URL: {final_url}")
-        html_content = response.text
-        print(f"Kích thước HTML: {len(html_content)} bytes")
-        write_debug_log(f"Kích thước HTML: {len(html_content)} bytes")
-        if 'application/json' in html_content or 'script' in html_content.lower():
-            print("Cảnh báo: Trang có thể yêu cầu JavaScript rendering.")
-            write_debug_log("Cảnh báo: Trang có thể yêu cầu JavaScript rendering.")
-    except Exception as e:
-        print(f"Lỗi khi truy cập trang {page_num}: {e}")
-        write_debug_log(f"Lỗi khi truy cập trang {page_num}: {e}")
+    
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
+        'Accept-Language': 'en-US,en;q=0.9,vi;q=0.8',
+        'Referer': config['DOMAIN'],
+        'Connection': 'keep-alive',
+        'Accept-Encoding': 'gzip, deflate, br',
+        'Upgrade-Insecure-Requests': '1'
+    }
+    
+    response, soup = get_page_with_redirects(url, headers)
+    if not response:
         return []
-
-    soup = BeautifulSoup(html_content, 'html.parser')
+    
+    html_content = response.text
+    print(f"Kích thước HTML: {len(html_content)} bytes")
+    write_debug_log(f"Kích thước HTML: {len(html_content)} bytes")
+    
+    # Check for JavaScript rendering
+    if 'application/json' in html_content or 'script' in html_content.lower():
+        print("Cảnh báo: Trang có thể yêu cầu JavaScript rendering.")
+        write_debug_log("Cảnh báo: Trang có thể yêu cầu JavaScript rendering.")
+    
+    # Try finding video items directly
     items = soup.find_all('div', class_='ht_grid_1_4 ht_grid_m_1_2')
     if not items:
         print("Không tìm thấy video-item với class 'ht_grid_1_4 ht_grid_m_1_2'.")
         write_debug_log("Không tìm thấy video-item với class 'ht_grid_1_4 ht_grid_m_1_2'.")
+        # Try alternative classes
         items = soup.find_all('div', class_=re.compile(r'post-\d+'))
         print(f"Thử tìm với class post-*: Tìm thấy {len(items)} video-item")
         write_debug_log(f"Thử tìm với class post-*: Tìm thấy {len(items)} video-item")
-
+    
+    # Debug: Log all div classes
     divs = soup.find_all('div')
     div_classes = [div.get('class', []) for div in divs]
     print(f"Tổng số thẻ div: {len(divs)}, Classes: {div_classes[:10]}")
     write_debug_log(f"Tổng số thẻ div: {len(divs)}, Classes: {div_classes[:10]}")
+    
+    # Save HTML for debugging
     with open(f'debug_page_{page_num}.html', 'w', encoding='utf-8') as f:
         f.write(html_content)
+    
     if not items:
         print(f"Không tìm thấy video-item trên trang {page_num}. Lưu HTML để debug.")
         write_debug_log(f"Không tìm thấy video-item trên trang {page_num}.")
         stop_scraping = True
         return []
-
+    
     print(f"Trang {page_num}: Tìm thấy {len(items)} video-item")
     write_debug_log(f"Trang {page_num}: Tìm thấy {len(items)} video-item")
-
+    
     video_data = []
     for item in items:
+        # Get video ID from id="post-XXXXX"
         video_id = str(item.get('id', '').replace('post-', '')) if item.get('id') else 'N/A'
         if video_id == 'N/A':
             continue
+        # Get title and link
         a_tag = item.find('a', class_='thumbnail-link')
         title = a_tag.get('title', 'N/A') if a_tag else 'N/A'
         link = urljoin(config['DOMAIN'], a_tag.get('href', 'N/A')) if a_tag else 'N/A'
+        
+        # Get thumbnail
         img_tag = item.find('img')
         source_tag = item.find('source', type='image/webp')
         thumbnail = source_tag.get('srcset', img_tag.get('src', 'N/A')) if source_tag or img_tag else 'N/A'
         thumbnail = urljoin(config['DOMAIN'], thumbnail.split(' ')[0]) if thumbnail != 'N/A' and not thumbnail.startswith('http') else thumbnail.split(' ')[0]
+        
+        # Get ribbons
         ribboni = item.find('p', class_='ribboni')
         ribboni = ribboni.text.strip() if ribboni else 'N/A'
         ribbons = item.find('p', class_='ribbons')
         ribbons = ribbons.text.strip() if ribbons else 'N/A'
         ribbont = item.find('span', class_='ribbont')
         duration = ribbont.text.strip() if ribbont else 'N/A'
+        
+        # Get categories and tags from class
         classes = item.get('class', [])
         categories = [cls.replace('category-', '') for cls in classes if cls.startswith('category-')]
         tags = [cls.replace('tag-', '') for cls in classes if cls.startswith('tag-')]
+        
+        # Get date and views (not available in provided HTML)
         date = 'N/A'
         views = 0
-
+        
         data = {
             'page': page_num,
             'id': video_id,
@@ -232,7 +227,7 @@ def scrape_page(page_num, config, update_global=True):
                     all_video_data.append(data)
     return video_data
 
-# Check if page 1 has new videos
+# Check if page 1 has new videos by comparing video IDs
 def has_new_videos_page1(config):
     existing_ids = {str(v['id']) for v in all_video_data if v['id'] != 'N/A'}
     print(f"Existing IDs: {existing_ids}")
@@ -253,6 +248,7 @@ def worker(config):
             page_num = page_queue.get_nowait()
         except queue.Empty:
             break
+        
         scrape_page(page_num, config)
         page_queue.task_done()
         time.sleep(0.5)
@@ -285,54 +281,58 @@ def convert_rating(rating_str):
 
 # Scrape detail page
 def scrape_detail(detail_link):
-    try:
-        headers = {
-            'User-Agent': random.choice(USER_AGENTS),
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
-            'Accept-Language': 'en-US,en;q=0.9,vi;q=0.8',
-            'Referer': detail_link,
-            'Connection': 'keep-alive',
-            'Accept-Encoding': 'gzip, deflate, br',
-            'Upgrade-Insecure-Requests': '1'
-        }
-        response, final_url = follow_redirects(detail_link, headers=headers)
-        if not response:
-            write_debug_log(f"Lỗi khi truy cập detail {detail_link}: Không thể theo dõi redirect")
-            return None
-        write_debug_log(f"Scraped detail URL: {final_url}, Status: {response.status_code}")
-    except Exception as e:
-        write_debug_log(f"Lỗi khi truy cập detail {detail_link}: {e}")
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
+        'Accept-Language': 'en-US,en;q=0.9,vi;q=0.8',
+        'Referer': detail_link,
+        'Connection': 'keep-alive',
+        'Accept-Encoding': 'gzip, deflate, br',
+        'Upgrade-Insecure-Requests': '1'
+    }
+    
+    response, soup = get_page_with_redirects(detail_link, headers)
+    if not response:
         return None
-    soup = BeautifulSoup(response.text, 'html.parser')
+    
     video_div = soup.find('div', id='video')
     if not video_div:
-        write_debug_log(f"Không tìm thấy div#video trong {final_url}")
+        write_debug_log(f"Không tìm thấy div#video trong {detail_link}")
         return None
+    
     detail_data = {}
     detail_data['video_id'] = str(video_div.get('data-id', 'N/A'))
     if detail_data['video_id'] == 'N/A':
-        write_debug_log(f"Không tìm thấy data-id trong div#video cho {final_url}")
+        write_debug_log(f"Không tìm thấy data-id trong div#video cho {detail_link}")
         return None
+    
     stats_div = soup.find('div', class_='video-stats')
     if stats_div:
         detail_data['likes'] = convert_likes_dislikes(stats_div.find('span', class_='likes').text.strip() if stats_div.find('span', class_='likes') else '0')
         detail_data['dislikes'] = convert_likes_dislikes(stats_div.find('span', class_='dislikes').text.strip() if stats_div.find('span', class_='dislikes') else '0')
         detail_data['rating'] = convert_rating(stats_div.find('span', class_='rating').text.strip() if stats_div.find('span', class_='rating') else '0')
         detail_data['views'] = convert_views(stats_div.find('span', class_='views').text.strip() if stats_div.find('span', class_='views') else '0')
+    
     info_div = soup.find('div', class_='video-info')
     if info_div:
         detail_data['video_code'] = info_div.find('span', class_='video-code').text.strip() if info_div.find('span', class_='video-code') else 'N/A'
         detail_data['video_link'] = info_div.find('span', class_='video-link').text.strip() if info_div.find('span', class_='video-link') else 'N/A'
+    
     desc_div = soup.find('div', class_='video-description')
     detail_data['description'] = desc_div.text.strip()[:1000] + '...' if desc_div and len(desc_div.text.strip()) > 1000 else (desc_div.text.strip() if desc_div else 'N/A')
+    
     actress_div = soup.find('div', class_='actress-tag')
     detail_data['actress'] = actress_div.find('a').get('title', 'N/A') if actress_div and actress_div.find('a') else 'N/A'
+    
+    # Tags
     tags_div = soup.find('div', class_='tags')
     if tags_div:
         tags = [tag.text.strip() for tag in tags_div.find_all(['a', 'span'])]
         detail_data['tags'] = tags if tags else ['N/A']
     else:
         detail_data['tags'] = ['N/A']
+    
+    # Additional info from detail page
     duration = soup.find('span', class_='duration')
     detail_data['duration'] = duration.text.strip() if duration else 'N/A'
     release_date = soup.find('span', class_='release-date')
@@ -345,9 +345,12 @@ def scrape_detail(detail_link):
     detail_data['language'] = language.text.strip() if language else 'N/A'
     comment_count = soup.find('span', class_='comment-count')
     detail_data['comment_count'] = convert_likes_dislikes(comment_count.text.strip()) if comment_count else 0
+    
+    # Meta tags in <head>
     meta_tags = soup.find_all('meta')
     detail_data['meta_description'] = next((meta.get('content', 'N/A') for meta in meta_tags if meta.get('name') == 'description'), 'N/A')
     detail_data['meta_keywords'] = next((meta.get('content', 'N/A') for meta in meta_tags if meta.get('name') == 'keywords'), 'N/A')
+    
     return detail_data
 
 # Worker for details
@@ -376,7 +379,7 @@ def detail_worker(config):
             write_debug_log(f"Lỗi trong detail_worker: {e}")
             detail_queue.task_done()
 
-# Save data.txt as JSON
+# Save data.txt as JSON, sorted by page (asc) and id (desc)
 def save_data_txt(config):
     try:
         df = pd.DataFrame(all_video_data)
@@ -399,15 +402,18 @@ def update_google_sheets(config):
         creds = ServiceAccountCredentials.from_json_keyfile_name(config['CREDENTIALS_FILE'], config.get('SCOPE', []))
         client = gspread.authorize(creds)
         sheet = client.open_by_key(config.get('SHEET_ID', '')).sheet1
+        
         if all_video_data:
             df = pd.DataFrame(all_video_data)
             df['id'] = pd.to_numeric(df['id'], errors='coerce')
             df = df.drop_duplicates(subset=['id', 'link'], keep='last')
             df = df.sort_values(by=['page', 'id'], ascending=[True, False])
+            # Convert list columns to strings for Sheets
             for col in ['categories', 'tags']:
                 if col in df.columns:
                     df[col] = df[col].apply(lambda x: ', '.join(x) if isinstance(x, list) else x)
             values = [df.columns.values.tolist()] + df.values.tolist()
+            
             df.to_csv(config.get('TEMP_CSV', 'temp.csv'), index=False, encoding='utf-8')
             with sheets_lock:
                 sheet.clear()
@@ -421,21 +427,26 @@ def main():
     global stop_scraping, queueing_complete
     start_total = time.time()
     steps = []
+    # Clear debug log
     if os.path.exists(DEBUG_LOG):
         os.remove(DEBUG_LOG)
+    # Load config
     config = load_config()
     if not config:
         print("Không thể đọc config.json, thoát!")
         write_debug_log("Không thể đọc config.json, thoát!")
         return
+    # Step 1: Load existing data from data.txt
     all_video_data.extend(load_existing_data(config))
     print(f"Đã load {len(all_video_data)} video từ data.txt")
     steps.append(f"Đã đọc file data.txt, load {len(all_video_data)} video.")
+    # Step 2: Determine run mode
     run_mode = config.get('RUN_MODE', 'real')
     if run_mode == 'test':
         max_pages = 1
         steps.append("Chạy ở chế độ TEST: chỉ quét trang 1.")
     else:
+        # Step 3: Check page 1 for new videos
         has_new = has_new_videos_page1(config)
         if has_new:
             print("Có video mới trên trang 1.")
@@ -447,6 +458,7 @@ def main():
             steps.append("Quét trang 1, không có video mới.")
             max_pages = 3
             steps.append("Quét pagination trang 1 đến 3.")
+    # Step 4: Scrape pagination
     for page_num in range(1, max_pages + 1):
         page_queue.put(page_num)
     threads = []
@@ -454,21 +466,26 @@ def main():
         t = threading.Thread(target=worker, args=(config,))
         t.start()
         threads.append(t)
+    
     for t in threads:
         t.join()
+    # Step 5: Prepare pending details
     pending_links = [video['link'] for video in all_video_data if video.get('link', 'N/A') != 'N/A']
     pending_links = list(set(pending_links))
     steps.append(f"Quét details cho {len(pending_links)} video.")
     print(f"Total detail links to scrape: {len(pending_links)}")
     write_debug_log(f"Total detail links to scrape: {len(pending_links)}")
+    # Step 6: Queue detail links
     for link in pending_links:
         detail_queue.put(link)
     queueing_complete = True
+    # Step 7: Scrape details with multiple threads
     detail_threads_list = []
     for _ in range(min(config.get('DETAIL_THREADS', 3), len(pending_links))):
         t = threading.Thread(target=detail_worker, args=(config,))
         t.start()
         detail_threads_list.append(t)
+    
     for t in detail_threads_list:
         t.join()
     while not detail_queue.empty():
@@ -477,6 +494,7 @@ def main():
             detail_queue.task_done()
         except queue.Empty:
             break
+    # Summary
     total_pages = len(set(video['page'] for video in all_video_data if video['page'] != 'N/A'))
     total_videos = len(all_video_data)
     total_detailed = len([video for video in all_video_data if 'views' in video])
