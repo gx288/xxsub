@@ -1,0 +1,11 @@
+{
+  "DOMAIN": "https://xxsub.icu",
+  "NUM_THREADS": 20,
+  "LIMIT_PAGES_NO_NEW": 10,
+  "DETAIL_DELAY": 1,
+  "DATA_TXT": "data.txt",
+  "TEMP_CSV": "temp.csv",
+  "SCOPE": ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"],
+  "CREDENTIALS_FILE": "credentials.json",
+  "SHEET_ID": "1E16H3BeNwGGsM493Gd9ix3NygulvzA8dU5OZjXFHwlQ"  
+}
