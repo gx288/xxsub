@@ -69,39 +69,51 @@ def load_existing_data(config):
             json.dump([], f, ensure_ascii=False)
         return []
 
+# Function to extract meta refresh URL
+def get_meta_refresh_url(soup):
+    meta = soup.find('meta', attrs={'http-equiv': 'refresh'})
+    if meta and 'content' in meta.attrs:
+        content = meta['content']
+        parts = content.split(';')
+        if len(parts) > 1:
+            url_part = parts[1].strip().lower()
+            if url_part.startswith('url='):
+                return url_part[4:].strip()
+    return None
+
 # Function to handle requests with redirect following (HTTP and meta refresh)
-def get_page_with_redirects(url, headers, max_redirects=10):
+def get_page_with_redirects(url, headers, max_redirects=10, delay=1):
+    session = requests.Session()
     redirect_count = 0
     current_url = url
+
     while redirect_count < max_redirects:
         try:
-            response = requests.get(current_url, headers=headers, timeout=10, allow_redirects=True)
+            response = session.get(current_url, headers=headers, allow_redirects=True, timeout=10)
             response.raise_for_status()
             print(f"Status code for {current_url}: {response.status_code}")
             write_debug_log(f"Status code for {current_url}: {response.status_code}")
             
             # Parse the content to check for meta refresh
             soup = BeautifulSoup(response.text, 'html.parser')
-            meta_refresh = soup.find('meta', attrs={'http-equiv': re.compile(r'refresh', re.I)})
-            if meta_refresh:
-                content = meta_refresh.get('content', '')
-                match = re.search(r'url=(.*)', content, re.I)
-                if match:
-                    redirect_url = match.group(1).strip().strip("'").strip('"')
-                    redirect_url = urljoin(current_url, redirect_url)
-                    print(f"Detected meta refresh redirect to: {redirect_url}")
-                    write_debug_log(f"Detected meta refresh redirect to: {redirect_url}")
-                    current_url = redirect_url
-                    redirect_count += 1
-                    continue
-                else:
-                    print(f"Meta refresh found but no URL in: {content}")
-                    write_debug_log(f"Meta refresh found but no URL in: {content}")
+            redirect_url = get_meta_refresh_url(soup)
+            if redirect_url:
+                redirect_url = urljoin(current_url, redirect_url)
+                print(f"Detected meta refresh redirect to: {redirect_url}")
+                write_debug_log(f"Detected meta refresh redirect to: {redirect_url}")
+                current_url = redirect_url
+                redirect_count += 1
+                time.sleep(delay)
+                continue
+            
             return response, soup
         except requests.exceptions.RequestException as e:
             print(f"Lỗi khi truy cập {current_url}: {e}")
             write_debug_log(f"Lỗi khi truy cập {current_url}: {e}")
             return None, None
+        
+        time.sleep(delay)
+
     print(f"Exceeded max redirects ({max_redirects}) for {url}")
     write_debug_log(f"Exceeded max redirects ({max_redirects}) for {url}")
     return None, None
@@ -116,10 +128,10 @@ def scrape_page(page_num, config, update_global=True):
     write_debug_log(f"Đang truy cập URL: {url}")
     
     headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
-        'Accept-Language': 'en-US,en;q=0.9,vi;q=0.8',
-        'Referer': config['DOMAIN'],
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.9',
+        'Referer': 'https://www.google.com/',
         'Connection': 'keep-alive',
         'Accept-Encoding': 'gzip, deflate, br',
         'Upgrade-Insecure-Requests': '1'
@@ -282,10 +294,10 @@ def convert_rating(rating_str):
 # Scrape detail page
 def scrape_detail(detail_link):
     headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
-        'Accept-Language': 'en-US,en;q=0.9,vi;q=0.8',
-        'Referer': detail_link,
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.9',
+        'Referer': 'https://www.google.com/',
         'Connection': 'keep-alive',
         'Accept-Encoding': 'gzip, deflate, br',
         'Upgrade-Insecure-Requests': '1'
