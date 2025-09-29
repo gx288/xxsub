@@ -9,6 +9,7 @@ from oauth2client.service_account import ServiceAccountCredentials
 import pandas as pd
 import os
 import json
+import re
 
 # Locks
 sheets_lock = threading.Lock()
@@ -51,13 +52,19 @@ def scrape_page(page_num, config, update_global=True):
         return []
     url = f"{config['DOMAIN']}/" if page_num == 1 else f"{config['DOMAIN']}/new/{page_num}/"
     try:
-        response = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=10)
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.5',
+            'Referer': config['DOMAIN']
+        }
+        response = requests.get(url, headers=headers, timeout=10)
         response.raise_for_status()
     except requests.exceptions.RequestException as e:
         print(f"Lỗi khi truy cập trang {page_num}: {e}")
         return []
     soup = BeautifulSoup(response.text, 'html.parser')
-    items = soup.find_all('div', class_='video-item')
+    items = soup.find_all('div', class_='ht_grid_1_4 ht_grid_m_1_2')
     print(f"Trang {page_num}: Tìm thấy {len(items)} video-item")
     if not items:
         print(f"Không tìm thấy video-item trên trang {page_num}. Lưu HTML để debug.")
@@ -67,29 +74,39 @@ def scrape_page(page_num, config, update_global=True):
         return []
     video_data = []
     for item in items:
-        video_id = str(item.get('id', '').replace('video-', '')) if item.get('id') else 'N/A'
+        # Get video ID from id="post-XXXXX"
+        video_id = str(item.get('id', '').replace('post-', '')) if item.get('id') else 'N/A'
         if video_id == 'N/A':
             continue
-        a_tag = item.find('a')
+        # Get title and link
+        a_tag = item.find('a', class_='thumbnail-link')
         title = a_tag.get('title', 'N/A') if a_tag else 'N/A'
         link = urljoin(config['DOMAIN'], a_tag.get('href', 'N/A')) if a_tag else 'N/A'
-       
-        img_tag = item.find('img', class_='video-image')
-        thumbnail = img_tag.get('data-original', img_tag.get('src', 'N/A')) if img_tag else 'N/A'
-        thumbnail = urljoin(config['DOMAIN'], thumbnail) if thumbnail != 'N/A' and not thumbnail.startswith('http') else thumbnail
-       
-        ribbon_div = item.find('div', class_='ribbon')
-        ribbon = ribbon_div.text.strip() if ribbon_div else 'N/A'
-       
-        # Additional info from pagination
-        duration = item.find('span', class_='duration')
-        duration = duration.text.strip() if duration else 'N/A'
-        date = item.find('span', class_='date')
-        date = date.text.strip() if date else 'N/A'
-        category = item.find('div', class_='category')
-        category = category.text.strip() if category else 'N/A'
-        views = item.find('span', class_='views')
-        views = convert_views(views.text.strip()) if views else 0
+        
+        # Get thumbnail
+        img_tag = item.find('img')
+        source_tag = item.find('source', type='image/webp')
+        thumbnail = source_tag.get('srcset', img_tag.get('src', 'N/A')) if source_tag or img_tag else 'N/A'
+        thumbnail = urljoin(config['DOMAIN'], thumbnail.split(' ')[0]) if thumbnail != 'N/A' and not thumbnail.startswith('http') else thumbnail.split(' ')[0]
+        
+        # Get ribbons
+        ribboni = item.find('p', class_='ribboni')
+        ribboni = ribboni.text.strip() if ribboni else 'N/A'
+        ribbons = item.find('p', class_='ribbons')
+        ribbons = ribbons.text.strip() if ribbons else 'N/A'
+        ribbont = item.find('span', class_='ribbont')
+        duration = ribbont.text.strip() if ribbont else 'N/A'
+        
+        # Get categories and tags from class
+        classes = item.get('class', [])
+        categories = [cls.replace('category-', '') for cls in classes if cls.startswith('category-')]
+        tags = [cls.replace('tag-', '') for cls in classes if cls.startswith('tag-')]
+        
+        # Get date (not available in provided HTML, set to N/A)
+        date = 'N/A'
+        
+        # Get views (not available in provided HTML, set to 0)
+        views = 0
         
         data = {
             'page': page_num,
@@ -97,12 +114,15 @@ def scrape_page(page_num, config, update_global=True):
             'title': title,
             'link': link,
             'thumbnail': thumbnail,
-            'ribbon': ribbon,
+            'ribboni': ribboni,
+            'ribbons': ribbons,
             'duration': duration,
             'date': date,
-            'category': category,
+            'categories': categories if categories else ['N/A'],
+            'tags': tags if tags else ['N/A'],
             'views_pagination': views
         }
+        print(f"Scraped video from page {page_num}: {data}")
         video_data.append(data)
         if update_global:
             with sheets_lock:
@@ -165,7 +185,13 @@ def convert_rating(rating_str):
 # Scrape detail page
 def scrape_detail(detail_link):
     try:
-        response = requests.get(detail_link, headers={'User-Agent': 'Mozilla/5.0'}, timeout=10)
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.5',
+            'Referer': detail_link
+        }
+        response = requests.get(detail_link, headers=headers, timeout=10)
         response.raise_for_status()
     except requests.exceptions.RequestException:
         return None
@@ -227,7 +253,7 @@ def detail_worker(config):
                 break
             detail_data = scrape_detail(detail_link)
             if detail_data:
-                print(f"Scraped: {detail_link}")
+                print(f"Scraped detail: {detail_link}")
                 with sheets_lock:
                     for video in all_video_data:
                         if video['id'] == detail_data['video_id'] and video['link'] == detail_link:
@@ -269,8 +295,9 @@ def update_google_sheets(config):
             df = df.drop_duplicates(subset=['id', 'link'], keep='last')
             df = df.sort_values(by=['page', 'id'], ascending=[True, False])
             # Convert list columns to strings for Sheets
-            if 'tags' in df.columns:
-                df['tags'] = df['tags'].apply(lambda x: ', '.join(x) if isinstance(x, list) else x)
+            for col in ['categories', 'tags']:
+                if col in df.columns:
+                    df[col] = df[col].apply(lambda x: ', '.join(x) if isinstance(x, list) else x)
             values = [df.columns.values.tolist()] + df.values.tolist()
            
             df.to_csv(config.get('TEMP_CSV', 'temp.csv'), index=False, encoding='utf-8')
