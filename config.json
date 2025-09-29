@@ -1,7 +1,7 @@
 {
   "DOMAIN": "https://xa.phimsexvietsub.icu",
   "MAX_PAGES": 300,
-  "NUM_THREADS": 100,
+  "NUM_THREADS": 20,
   "DETAIL_THREADS": 100,
   "DETAIL_DELAY": 1,
   "RUN_MODE": "real",
