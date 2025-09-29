@@ -4,7 +4,7 @@
   "NUM_THREADS": 5,
   "DETAIL_THREADS": 3,
   "DETAIL_DELAY": 1,
-  "RUN_MODE": "test",
+  "RUN_MODE": "real",
   "DATA_TXT": "data.txt",
   "CREDENTIALS_FILE": "credentials.json",
   "SCOPE": ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"],
