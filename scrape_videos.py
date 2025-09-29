@@ -31,7 +31,7 @@ def load_config():
 
 # Load existing data from data.txt
 def load_existing_data(config):
-    if os.path.exists(config['DATA_TXT']):
+    if os.path.exists(config.get('DATA_TXT', 'data.txt')):
         try:
             with open(config['DATA_TXT'], 'r', encoding='utf-8') as f:
                 existing_data = json.load(f)
@@ -53,11 +53,16 @@ def scrape_page(page_num, config, update_global=True):
     try:
         response = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=10)
         response.raise_for_status()
-    except requests.exceptions.RequestException:
+    except requests.exceptions.RequestException as e:
+        print(f"Lỗi khi truy cập trang {page_num}: {e}")
         return []
     soup = BeautifulSoup(response.text, 'html.parser')
     items = soup.find_all('div', class_='video-item')
+    print(f"Trang {page_num}: Tìm thấy {len(items)} video-item")
     if not items:
+        print(f"Không tìm thấy video-item trên trang {page_num}. Lưu HTML để debug.")
+        with open(f'debug_page_{page_num}.html', 'w', encoding='utf-8') as f:
+            f.write(response.text)
         stop_scraping = True
         return []
     video_data = []
@@ -229,7 +234,7 @@ def detail_worker(config):
                             video.update(detail_data)
                             break
             detail_queue.task_done()
-            time.sleep(config['DETAIL_DELAY'])
+            time.sleep(config.get('DETAIL_DELAY', 1))
         except queue.Empty:
             if queueing_complete:
                 break
@@ -244,19 +249,19 @@ def save_data_txt(config):
         df = df.drop_duplicates(subset=['id', 'link'], keep='last')
         df = df.sort_values(by=['page', 'id'], ascending=[True, False])
         sorted_data = df.to_dict('records')
-        with open(config['DATA_TXT'], 'w', encoding='utf-8') as f:
+        with open(config.get('DATA_TXT', 'data.txt'), 'w', encoding='utf-8') as f:
             json.dump(sorted_data, f, ensure_ascii=False, indent=2)
     except Exception:
         pass
 
 # Update Google Sheets
 def update_google_sheets(config):
-    if not os.path.exists(config['CREDENTIALS_FILE']):
+    if not os.path.exists(config.get('CREDENTIALS_FILE', '')):
         return
     try:
-        creds = ServiceAccountCredentials.from_json_keyfile_name(config['CREDENTIALS_FILE'], config['SCOPE'])
+        creds = ServiceAccountCredentials.from_json_keyfile_name(config['CREDENTIALS_FILE'], config.get('SCOPE', []))
         client = gspread.authorize(creds)
-        sheet = client.open_by_key(config['SHEET_ID']).sheet1
+        sheet = client.open_by_key(config.get('SHEET_ID', '')).sheet1
        
         if all_video_data:
             df = pd.DataFrame(all_video_data)
@@ -268,7 +273,7 @@ def update_google_sheets(config):
                 df['tags'] = df['tags'].apply(lambda x: ', '.join(x) if isinstance(x, list) else x)
             values = [df.columns.values.tolist()] + df.values.tolist()
            
-            df.to_csv(config['TEMP_CSV'], index=False, encoding='utf-8')
+            df.to_csv(config.get('TEMP_CSV', 'temp.csv'), index=False, encoding='utf-8')
             with sheets_lock:
                 sheet.clear()
                 sheet.update(values=values, range_name='A1')
@@ -289,45 +294,47 @@ def main():
     all_video_data.extend(load_existing_data(config))
     print(f"Đã load {len(all_video_data)} video từ data.txt")
     steps.append(f"Đã đọc file data.txt, load {len(all_video_data)} video.")
-    # Step 2: Check page 1 for new videos
-    has_new = has_new_videos_page1(config)
-    if has_new:
-        print("Có video mới trên trang 1.")
-        steps.append("Quét trang 1, có video mới.")
-        max_pages = config['MAX_PAGES']
-        steps.append(f"Quét pagination từ trang 1 đến {config['MAX_PAGES']}.")
+    # Step 2: Determine run mode
+    run_mode = config.get('RUN_MODE', 'real')
+    if run_mode == 'test':
+        max_pages = 1
+        steps.append("Chạy ở chế độ TEST: chỉ quét trang 1.")
     else:
-        print("Không có video mới trên trang 1.")
-        steps.append("Quét trang 1, không có video mới.")
-        max_pages = 3
-        steps.append("Quét pagination trang 1 đến 3.")
-    # Step 3: Scrape pagination
+        # Step 3: Check page 1 for new videos
+        has_new = has_new_videos_page1(config)
+        if has_new:
+            print("Có video mới trên trang 1.")
+            steps.append("Quét trang 1, có video mới.")
+            max_pages = config.get('MAX_PAGES', 100)
+            steps.append(f"Quét pagination từ trang 1 đến {max_pages}.")
+        else:
+            print("Không có video mới trên trang 1.")
+            steps.append("Quét trang 1, không có video mới.")
+            max_pages = 3
+            steps.append("Quét pagination trang 1 đến 3.")
+    # Step 4: Scrape pagination
     for page_num in range(1, max_pages + 1):
         page_queue.put(page_num)
     threads = []
-    for _ in range(config['NUM_THREADS']):
+    for _ in range(config.get('NUM_THREADS', 5)):
         t = threading.Thread(target=worker, args=(config,))
         t.start()
         threads.append(t)
    
     for t in threads:
         t.join()
-    # Step 4: Prepare pending details
-    if has_new:
-        pending_links = [video['link'] for video in all_video_data if video.get('link', 'N/A') != 'N/A']
-        steps.append("Quét details cho toàn bộ video.")
-    else:
-        pending_links = [video['link'] for video in all_video_data if video.get('page', 0) <= 3 and video.get('link', 'N/A') != 'N/A']
-        steps.append("Quét details cho video ở 3 trang đầu.")
+    # Step 5: Prepare pending details
+    pending_links = [video['link'] for video in all_video_data if video.get('link', 'N/A') != 'N/A']
     pending_links = list(set(pending_links))
+    steps.append(f"Quét details cho {len(pending_links)} video.")
     print(f"Total detail links to scrape: {len(pending_links)}")
-    # Step 5: Queue detail links
+    # Step 6: Queue detail links
     for link in pending_links:
         detail_queue.put(link)
     queueing_complete = True
-    # Step 6: Scrape details with multiple threads
+    # Step 7: Scrape details with multiple threads
     detail_threads_list = []
-    for _ in range(min(config['DETAIL_THREADS'], len(pending_links))):
+    for _ in range(min(config.get('DETAIL_THREADS', 3), len(pending_links))):
         t = threading.Thread(target=detail_worker, args=(config,))
         t.start()
         detail_threads_list.append(t)
