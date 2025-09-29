@@ -41,20 +41,33 @@ def load_config():
 
 # Load existing data from data.txt
 def load_existing_data(config):
-    if os.path.exists(config.get('DATA_TXT', 'data.txt')):
+    data_file = config.get('DATA_TXT', 'data.txt')
+    if os.path.exists(data_file):
         try:
-            with open(config['DATA_TXT'], 'r', encoding='utf-8') as f:
-                existing_data = json.load(f)
-            # Ensure IDs are strings
-            for v in existing_data:
-                if 'id' in v:
-                    v['id'] = str(v['id'])
-            return [v for v in existing_data if v.get('id') != 'N/A']
-        except Exception as e:
-            print(f"Lỗi khi đọc data.txt: {e}")
-            write_debug_log(f"Lỗi khi đọc data.txt: {e}")
+            with open(data_file, 'r', encoding='utf-8') as f:
+                content = f.read().strip()
+                if not content:
+                    print("data.txt rỗng, khởi tạo mảng rỗng.")
+                    write_debug_log("data.txt rỗng, khởi tạo mảng rỗng.")
+                    return []
+                existing_data = json.loads(content)
+                # Ensure IDs are strings
+                for v in existing_data:
+                    if 'id' in v:
+                        v['id'] = str(v['id'])
+                return [v for v in existing_data if v.get('id') != 'N/A']
+        except json.JSONDecodeError as e:
+            print(f"Lỗi khi đọc data.txt: {e}. Khởi tạo mảng rỗng.")
+            write_debug_log(f"Lỗi khi đọc data.txt: {e}. Khởi tạo mảng rỗng.")
+            with open(data_file, 'w', encoding='utf-8') as f:
+                json.dump([], f, ensure_ascii=False)
             return []
-    return []
+    else:
+        print(f"data.txt không tồn tại, tạo file mới.")
+        write_debug_log(f"data.txt không tồn tại, tạo file mới.")
+        with open(data_file, 'w', encoding='utf-8') as f:
+            json.dump([], f, ensure_ascii=False)
+        return []
 
 # Scrape pagination page
 def scrape_page(page_num, config, update_global=True):
@@ -68,7 +81,7 @@ def scrape_page(page_num, config, update_global=True):
         headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36',
             'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
-            'Accept-Language': 'en-US,en;q=0.9',
+            'Accept-Language': 'en-US,en;q=0.9,vi;q=0.8',
             'Referer': config['DOMAIN'],
             'Connection': 'keep-alive',
             'Accept-Encoding': 'gzip, deflate, br',
@@ -78,37 +91,44 @@ def scrape_page(page_num, config, update_global=True):
         print(f"Status code: {response.status_code}")
         write_debug_log(f"Status code: {response.status_code}")
         response.raise_for_status()
+        html_content = response.text
+        print(f"Kích thước HTML: {len(html_content)} bytes")
+        write_debug_log(f"Kích thước HTML: {len(html_content)} bytes")
+        # Check for JavaScript rendering
+        if 'application/json' in response.text or 'script' in response.text.lower():
+            print("Cảnh báo: Trang có thể yêu cầu JavaScript rendering.")
+            write_debug_log("Cảnh báo: Trang có thể yêu cầu JavaScript rendering.")
     except requests.exceptions.RequestException as e:
         print(f"Lỗi khi truy cập trang {page_num}: {e}")
         write_debug_log(f"Lỗi khi truy cập trang {page_num}: {e}")
         return []
     
-    soup = BeautifulSoup(response.text, 'html.parser')
-    # Find container
-    container = soup.find('div', id='recent-content', class_='content-loop')
-    if not container:
-        print("Không tìm thấy container recent-content.")
-        write_debug_log("Không tìm thấy container recent-content.")
-        # Debug: Check for other divs with similar classes
-        divs = soup.find_all('div')
-        div_classes = [div.get('class', []) for div in divs]
-        print(f"Các class div tìm thấy: {div_classes[:10]}")  # Log first 10 for brevity
-        write_debug_log(f"Các class div tìm thấy: {div_classes[:10]}")
-        with open(f'debug_page_{page_num}.html', 'w', encoding='utf-8') as f:
-            f.write(response.text)
-        stop_scraping = True
-        return []
-    
-    items = container.find_all('div', class_='ht_grid_1_4 ht_grid_m_1_2')
-    print(f"Trang {page_num}: Tìm thấy {len(items)} video-item")
-    write_debug_log(f"Trang {page_num}: Tìm thấy {len(items)} video-item")
+    soup = BeautifulSoup(html_content, 'html.parser')
+    # Try finding video items directly
+    items = soup.find_all('div', class_='ht_grid_1_4 ht_grid_m_1_2')
+    if not items:
+        print("Không tìm thấy video-item với class 'ht_grid_1_4 ht_grid_m_1_2'.")
+        write_debug_log("Không tìm thấy video-item với class 'ht_grid_1_4 ht_grid_m_1_2'.")
+        # Try alternative classes
+        items = soup.find_all('div', class_=re.compile(r'post-\d+'))
+        print(f"Thử tìm với class post-*: Tìm thấy {len(items)} video-item")
+        write_debug_log(f"Thử tìm với class post-*: Tìm thấy {len(items)} video-item")
+    # Debug: Log all div classes
+    divs = soup.find_all('div')
+    div_classes = [div.get('class', []) for div in divs]
+    print(f"Tổng số thẻ div: {len(divs)}, Classes: {div_classes[:10]}")
+    write_debug_log(f"Tổng số thẻ div: {len(divs)}, Classes: {div_classes[:10]}")
+    # Save HTML for debugging
+    with open(f'debug_page_{page_num}.html', 'w', encoding='utf-8') as f:
+        f.write(html_content)
     if not items:
         print(f"Không tìm thấy video-item trên trang {page_num}. Lưu HTML để debug.")
         write_debug_log(f"Không tìm thấy video-item trên trang {page_num}.")
-        with open(f'debug_page_{page_num}.html', 'w', encoding='utf-8') as f:
-            f.write(response.text)
         stop_scraping = True
         return []
+    
+    print(f"Trang {page_num}: Tìm thấy {len(items)} video-item")
+    write_debug_log(f"Trang {page_num}: Tìm thấy {len(items)} video-item")
     
     video_data = []
     for item in items:
@@ -228,7 +248,7 @@ def scrape_detail(detail_link):
         headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36',
             'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
-            'Accept-Language': 'en-US,en;q=0.9',
+            'Accept-Language': 'en-US,en;q=0.9,vi;q=0.8',
             'Referer': detail_link,
             'Connection': 'keep-alive',
             'Accept-Encoding': 'gzip, deflate, br',
