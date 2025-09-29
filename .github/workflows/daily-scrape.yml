@@ -30,7 +30,7 @@ jobs:
         cat credentials.json  # Debug
 
     - name: Run script
-      run: python scrape_videos.py
+      run: python -u scrape_videos.py
     - name: Print Debug Log Content
       if: always() # Luôn chạy, kể cả khi bước trước lỗi
       run: |
