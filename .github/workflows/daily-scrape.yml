@@ -45,6 +45,8 @@ jobs:
       with:
         name: temp-videos
         path: temp_videos.csv
+    - name: upload temp html  
+      uses: actions/upload-artifact@v4
       with:
         name: debug-files
         path: debug_page_1.html
