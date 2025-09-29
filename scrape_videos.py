@@ -21,6 +21,14 @@ stop_scraping = False
 queueing_complete = False
 all_video_data = []
 
+# Debug log file
+DEBUG_LOG = "debug_log.txt"
+
+# Write to debug log
+def write_debug_log(message):
+    with open(DEBUG_LOG, 'a', encoding='utf-8') as f:
+        f.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')}: {message}\n")
+
 # Load config from config.json
 def load_config():
     try:
@@ -28,6 +36,7 @@ def load_config():
             return json.load(f)
     except Exception as e:
         print(f"Lỗi khi đọc config.json: {e}")
+        write_debug_log(f"Lỗi khi đọc config.json: {e}")
         return {}
 
 # Load existing data from data.txt
@@ -41,7 +50,9 @@ def load_existing_data(config):
                 if 'id' in v:
                     v['id'] = str(v['id'])
             return [v for v in existing_data if v.get('id') != 'N/A']
-        except Exception:
+        except Exception as e:
+            print(f"Lỗi khi đọc data.txt: {e}")
+            write_debug_log(f"Lỗi khi đọc data.txt: {e}")
             return []
     return []
 
@@ -51,27 +62,54 @@ def scrape_page(page_num, config, update_global=True):
     if stop_scraping:
         return []
     url = f"{config['DOMAIN']}/" if page_num == 1 else f"{config['DOMAIN']}/new/{page_num}/"
+    print(f"Đang truy cập URL: {url}")
+    write_debug_log(f"Đang truy cập URL: {url}")
     try:
         headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-            'Accept-Language': 'en-US,en;q=0.5',
-            'Referer': config['DOMAIN']
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
+            'Accept-Language': 'en-US,en;q=0.9',
+            'Referer': config['DOMAIN'],
+            'Connection': 'keep-alive',
+            'Accept-Encoding': 'gzip, deflate, br',
+            'Upgrade-Insecure-Requests': '1'
         }
         response = requests.get(url, headers=headers, timeout=10)
+        print(f"Status code: {response.status_code}")
+        write_debug_log(f"Status code: {response.status_code}")
         response.raise_for_status()
     except requests.exceptions.RequestException as e:
         print(f"Lỗi khi truy cập trang {page_num}: {e}")
+        write_debug_log(f"Lỗi khi truy cập trang {page_num}: {e}")
         return []
+    
     soup = BeautifulSoup(response.text, 'html.parser')
-    items = soup.find_all('div', class_='ht_grid_1_4 ht_grid_m_1_2')
-    print(f"Trang {page_num}: Tìm thấy {len(items)} video-item")
-    if not items:
-        print(f"Không tìm thấy video-item trên trang {page_num}. Lưu HTML để debug.")
+    # Find container
+    container = soup.find('div', id='recent-content', class_='content-loop')
+    if not container:
+        print("Không tìm thấy container recent-content.")
+        write_debug_log("Không tìm thấy container recent-content.")
+        # Debug: Check for other divs with similar classes
+        divs = soup.find_all('div')
+        div_classes = [div.get('class', []) for div in divs]
+        print(f"Các class div tìm thấy: {div_classes[:10]}")  # Log first 10 for brevity
+        write_debug_log(f"Các class div tìm thấy: {div_classes[:10]}")
         with open(f'debug_page_{page_num}.html', 'w', encoding='utf-8') as f:
             f.write(response.text)
         stop_scraping = True
         return []
+    
+    items = container.find_all('div', class_='ht_grid_1_4 ht_grid_m_1_2')
+    print(f"Trang {page_num}: Tìm thấy {len(items)} video-item")
+    write_debug_log(f"Trang {page_num}: Tìm thấy {len(items)} video-item")
+    if not items:
+        print(f"Không tìm thấy video-item trên trang {page_num}. Lưu HTML để debug.")
+        write_debug_log(f"Không tìm thấy video-item trên trang {page_num}.")
+        with open(f'debug_page_{page_num}.html', 'w', encoding='utf-8') as f:
+            f.write(response.text)
+        stop_scraping = True
+        return []
+    
     video_data = []
     for item in items:
         # Get video ID from id="post-XXXXX"
@@ -102,10 +140,8 @@ def scrape_page(page_num, config, update_global=True):
         categories = [cls.replace('category-', '') for cls in classes if cls.startswith('category-')]
         tags = [cls.replace('tag-', '') for cls in classes if cls.startswith('tag-')]
         
-        # Get date (not available in provided HTML, set to N/A)
+        # Get date and views (not available in provided HTML)
         date = 'N/A'
-        
-        # Get views (not available in provided HTML, set to 0)
         views = 0
         
         data = {
@@ -123,6 +159,7 @@ def scrape_page(page_num, config, update_global=True):
             'views_pagination': views
         }
         print(f"Scraped video from page {page_num}: {data}")
+        write_debug_log(f"Scraped video from page {page_num}: {json.dumps(data, ensure_ascii=False)}")
         video_data.append(data)
         if update_global:
             with sheets_lock:
@@ -137,11 +174,14 @@ def scrape_page(page_num, config, update_global=True):
 def has_new_videos_page1(config):
     existing_ids = {str(v['id']) for v in all_video_data if v['id'] != 'N/A'}
     print(f"Existing IDs: {existing_ids}")
+    write_debug_log(f"Existing IDs: {existing_ids}")
     temp_video_data = scrape_page(1, config, update_global=False)
     new_ids = {str(v['id']) for v in temp_video_data if v['id'] != 'N/A'}
     print(f"New IDs from page 1: {new_ids}")
+    write_debug_log(f"New IDs from page 1: {new_ids}")
     new_videos = new_ids - existing_ids
     print(f"New video IDs detected: {new_videos}")
+    write_debug_log(f"New video IDs detected: {new_videos}")
     return bool(new_videos)
 
 # Worker for pagination
@@ -186,22 +226,29 @@ def convert_rating(rating_str):
 def scrape_detail(detail_link):
     try:
         headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-            'Accept-Language': 'en-US,en;q=0.5',
-            'Referer': detail_link
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
+            'Accept-Language': 'en-US,en;q=0.9',
+            'Referer': detail_link,
+            'Connection': 'keep-alive',
+            'Accept-Encoding': 'gzip, deflate, br',
+            'Upgrade-Insecure-Requests': '1'
         }
         response = requests.get(detail_link, headers=headers, timeout=10)
+        write_debug_log(f"Scraped detail URL: {detail_link}, Status: {response.status_code}")
         response.raise_for_status()
-    except requests.exceptions.RequestException:
+    except requests.exceptions.RequestException as e:
+        write_debug_log(f"Lỗi khi truy cập detail {detail_link}: {e}")
         return None
     soup = BeautifulSoup(response.text, 'html.parser')
     video_div = soup.find('div', id='video')
     if not video_div:
+        write_debug_log(f"Không tìm thấy div#video trong {detail_link}")
         return None
     detail_data = {}
     detail_data['video_id'] = str(video_div.get('data-id', 'N/A'))
     if detail_data['video_id'] == 'N/A':
+        write_debug_log(f"Không tìm thấy data-id trong div#video cho {detail_link}")
         return None
     stats_div = soup.find('div', class_='video-stats')
     if stats_div:
@@ -254,6 +301,7 @@ def detail_worker(config):
             detail_data = scrape_detail(detail_link)
             if detail_data:
                 print(f"Scraped detail: {detail_link}")
+                write_debug_log(f"Scraped detail: {detail_link}, Data: {json.dumps(detail_data, ensure_ascii=False)}")
                 with sheets_lock:
                     for video in all_video_data:
                         if video['id'] == detail_data['video_id'] and video['link'] == detail_link:
@@ -264,7 +312,8 @@ def detail_worker(config):
         except queue.Empty:
             if queueing_complete:
                 break
-        except Exception:
+        except Exception as e:
+            write_debug_log(f"Lỗi trong detail_worker: {e}")
             detail_queue.task_done()
 
 # Save data.txt as JSON, sorted by page (asc) and id (desc)
@@ -277,12 +326,14 @@ def save_data_txt(config):
         sorted_data = df.to_dict('records')
         with open(config.get('DATA_TXT', 'data.txt'), 'w', encoding='utf-8') as f:
             json.dump(sorted_data, f, ensure_ascii=False, indent=2)
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"Lỗi khi lưu data.txt: {e}")
+        write_debug_log(f"Lỗi khi lưu data.txt: {e}")
 
 # Update Google Sheets
 def update_google_sheets(config):
     if not os.path.exists(config.get('CREDENTIALS_FILE', '')):
+        write_debug_log("Không tìm thấy CREDENTIALS_FILE, bỏ qua Google Sheets.")
         return
     try:
         creds = ServiceAccountCredentials.from_json_keyfile_name(config['CREDENTIALS_FILE'], config.get('SCOPE', []))
@@ -304,18 +355,23 @@ def update_google_sheets(config):
             with sheets_lock:
                 sheet.clear()
                 sheet.update(values=values, range_name='A1')
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"Lỗi khi cập nhật Google Sheets: {e}")
+        write_debug_log(f"Lỗi khi cập nhật Google Sheets: {e}")
 
 # Main function
 def main():
     global stop_scraping, queueing_complete
     start_total = time.time()
     steps = []
+    # Clear debug log
+    if os.path.exists(DEBUG_LOG):
+        os.remove(DEBUG_LOG)
     # Load config
     config = load_config()
     if not config:
         print("Không thể đọc config.json, thoát!")
+        write_debug_log("Không thể đọc config.json, thoát!")
         return
     # Step 1: Load existing data from data.txt
     all_video_data.extend(load_existing_data(config))
@@ -355,6 +411,7 @@ def main():
     pending_links = list(set(pending_links))
     steps.append(f"Quét details cho {len(pending_links)} video.")
     print(f"Total detail links to scrape: {len(pending_links)}")
+    write_debug_log(f"Total detail links to scrape: {len(pending_links)}")
     # Step 6: Queue detail links
     for link in pending_links:
         detail_queue.put(link)
@@ -383,6 +440,7 @@ def main():
     for step in steps:
         print("- " + step)
     print(f"Tổng kết: {total_pages} trang, {total_videos} video, {total_detailed} video chi tiết, {elapsed_total:.2f}s")
+    write_debug_log(f"Tổng kết: {total_pages} trang, {total_videos} video, {total_detailed} video chi tiết, {elapsed_total:.2f}s")
     if all_video_data:
         save_data_txt(config)
         update_google_sheets(config)
