@@ -174,11 +174,18 @@ def scrape_page(page_num, config, update_global=True):
         if video_id == 'N/A':
             write_debug_log(f"Skipping item with no ID on page {page_num}")
             continue
-        # Get title and link
+
+        # Get thumbnail-link tag for link and fallback title
         a_tag = item.find('a', class_='thumbnail-link')
-        title = a_tag.get('title', 'N/A') if a_tag else 'N/A'
-        code = title.split(' ')[0] if title != 'N/A' else 'N/A'
         link = urljoin(base_url, a_tag.get('href', 'N/A')) if a_tag else 'N/A'
+
+        # Get title from entry-title or fallback to thumbnail-link
+        entry_title = item.find('h2', class_='entry-title')
+        title = entry_title.find('a').text.strip() if entry_title and entry_title.find('a') else 'N/A'
+        if title == 'N/A' and a_tag:
+            title = a_tag.get('title', 'N/A')
+
+        code = title.split(' ')[0] if title != 'N/A' else 'N/A'
 
         # Get thumbnail
         thumbnail_div = item.find('div', class_='thumbnail-wrap thumbnail-wrap2')
@@ -202,6 +209,7 @@ def scrape_page(page_num, config, update_global=True):
             'code': code,
             'link': link,
             'thumbnail': thumbnail,
+            'title': title,
             'ribbons': ribbons,
             'ribboni': ribboni,
             'categories': categories if categories else ['N/A']
@@ -258,7 +266,6 @@ def worker(config):
 # Convert likes/dislikes to number
 def convert_likes_dislikes(value):
     try:
-        return int(value.replacekeyboard_arrow_down)
         return int(value.replace('.', ''))
     except (ValueError, AttributeError):
         return 0
@@ -329,8 +336,8 @@ def save_data_txt(config):
         # Drop temporary numeric column, keep id as string
         df = df.drop(columns=['id_numeric'], errors='ignore')
         # Ensure only specified columns are saved
-        columns = ['page', 'id', 'code', 'link', 'thumbnail', 'ribbons', 'ribboni', 'categories', 'comment_count',
-                   'meta_description']
+        columns = ['page', 'id', 'code', 'link', 'thumbnail', 'title', 'ribbons', 'ribboni', 'categories',
+                   'comment_count', 'meta_description']
         df = df[[col for col in columns if col in df.columns]]
         sorted_data = df.to_dict('records')
         # Ensure id is string in output
@@ -362,8 +369,8 @@ def update_google_sheets(config):
             # Drop temporary numeric column, keep id as string
             df = df.drop(columns=['id_numeric'], errors='ignore')
             # Ensure only specified columns are saved
-            columns = ['page', 'id', 'code', 'link', 'thumbnail', 'ribbons', 'ribboni', 'categories', 'comment_count',
-                       'meta_description']
+            columns = ['page', 'id', 'code', 'link', 'thumbnail', 'title', 'ribbons', 'ribboni', 'categories',
+                       'comment_count', 'meta_description']
             df = df[[col for col in columns if col in df.columns]]
             # Convert list columns to strings for Sheets
             for col in ['categories']:
@@ -384,7 +391,6 @@ def update_google_sheets(config):
 
 # Main function
 def main():
-    print("bat dau")
     global stop_scraping, queueing_complete
     start_total = time.time()
     steps = []
@@ -400,25 +406,29 @@ def main():
     all_video_data.extend(load_existing_data(config))
     print(f"Đã load {len(all_video_data)} video từ data.txt")
     steps.append(f"Đã đọc file data.txt, load {len(all_video_data)} video.")
-    # Step 2: Determine run mode
+    # Step 2: Check for new videos on page 1
+    has_new = has_new_videos_page1(config)
+    if not has_new:
+        print("Không có video mới, dừng quét.")
+        steps.append("Không có video mới, dừng quét.")
+        write_debug_log("No new videos found, stopping.")
+        print("Tổng quát các bước thực hiện:")
+        for step in steps:
+            print("- " + step)
+        elapsed_total = time.time() - start_total
+        print(f"Tổng kết: 0 trang, {len(all_video_data)} video, 0 video chi tiết, {elapsed_total:.2f}s")
+        write_debug_log(f"Tổng kết: 0 trang, {len(all_video_data)} video, 0 video chi tiết, {elapsed_total:.2f}s")
+        return
+    # Step 3: Determine run mode
     run_mode = config.get('RUN_MODE', 'real')
     print(f"Chạy ở chế độ: {run_mode}")
+    steps.append("Tìm thấy video mới trên trang 1.")
     if run_mode == 'test':
         max_pages = 1
         steps.append("Chạy ở chế độ TEST: chỉ quét trang 1.")
     else:
-        # Step 3: Check page 1 for new videos
-        has_new = has_new_videos_page1(config)
-        if has_new:
-            print("Tìm thấy video mới trên trang 1")
-            steps.append("Quét trang 1, có video mới.")
-            max_pages = config.get('MAX_PAGES', 100)
-            steps.append(f"Quét pagination từ trang 1 đến {max_pages}.")
-        else:
-            print("Không tìm thấy video mới trên trang 1")
-            steps.append("Quét trang 1, không có video mới.")
-            max_pages = 3
-            steps.append("Quét pagination trang 1 đến 3.")
+        max_pages = config.get('MAX_PAGES', 100)
+        steps.append(f"Quét pagination từ trang 1 đến {max_pages}.")
     # Step 4: Scrape pagination
     for page_num in range(1, max_pages + 1):
         page_queue.put(page_num)
